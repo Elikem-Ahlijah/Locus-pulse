@@ -118,8 +118,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     if (!choice) break;
     const assistantMsg = choice.message;
 
+    // Strip MiniMax <think>...</think> reasoning block from final text
+    const stripThink = (s: string | null | undefined): string => {
+      if (!s) return '';
+      return s.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+    };
+
     if (!assistantMsg.tool_calls || assistantMsg.tool_calls.length === 0) {
-      finalText = assistantMsg.content ?? '';
+      finalText = stripThink(assistantMsg.content);
       break;
     }
 
@@ -436,16 +442,16 @@ async function callMiniMax(
   }
   try {
     const body: any = {
-      model: 'MiniMax-Text-01',
+      model: 'MiniMax-M3',
       messages,
       temperature: 0.3,
-      max_tokens: 500,
+      max_completion_tokens: 500,
     };
     if (tools.length > 0) {
       body.tools = tools;
       body.tool_choice = 'auto';
     }
-    const res = await fetch('https://api.MiniMax.chat/v1/chat/completions', {
+    const res = await fetch('https://api.minimax.io/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

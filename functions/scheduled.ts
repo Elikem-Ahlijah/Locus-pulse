@@ -205,16 +205,34 @@ async function runDailyRefresh(env: Env): Promise<string> {
     tasks.push(`fx: error ${e.message}`);
   }
 
-  // 6. Fuel prices (placeholder — replace with NPA scrape when URL known)
-  // TODO: scrape https://npa.gov.gh/petroleum-prices/ or weekly-published PDF
-  // For now seed with current known values (these will be refreshed weekly)
-  const fuel = [
-    { fuelType: 'petrol', priceGhs: 14.20, effectiveDate: date, source: 'NPA-pending' },
-    { fuelType: 'diesel', priceGhs: 16.50, effectiveDate: date, source: 'NPA-pending' },
-    { fuelType: 'lpg', priceGhs: 12.00, effectiveDate: date, source: 'NPA-pending' },
-  ];
-  await env.LOCUS_DATA.put(`fuel:${date}`, JSON.stringify(fuel));
-  tasks.push(`fuel: 3 entries (placeholder)`);
+  // 6. Fuel prices (real NPA scrape via Pumply / GOIL / Pulse)
+  try {
+    const { scrapeNpaFuelPrices } = await import('./_lib/npaScraper');
+    const fuel = await scrapeNpaFuelPrices();
+    if (fuel.length > 0) {
+      await env.LOCUS_DATA.put(`fuel:${date}`, JSON.stringify(fuel));
+      tasks.push(`fuel: ${fuel.length} from ${fuel[0].source}`);
+    } else {
+      tasks.push(`fuel: 0 (NPA scrape returned empty)`);
+    }
+  } catch (e: any) {
+    tasks.push(`fuel: error ${e.message}`);
+  }
+
+  // 6b. Power outages (real ECG scrape)
+  try {
+    const { scrapeEcgOutages } = await import('./_lib/ecgScraper');
+    const outages = await scrapeEcgOutages();
+    if (outages.length > 0) {
+      await env.LOCUS_DATA.put(`power:${date}`, JSON.stringify(outages));
+      const regions = [...new Set(outages.map((o) => o.region))].slice(0, 3).join(', ');
+      tasks.push(`power: ${outages.length} outages (${regions})`);
+    } else {
+      tasks.push(`power: 0 (ECG scrape empty)`);
+    }
+  } catch (e: any) {
+    tasks.push(`power: error ${e.message}`);
+  }
 
   // 7. Movies — now playing (TMDB)
   if (env.TMDB_API_KEY) {
