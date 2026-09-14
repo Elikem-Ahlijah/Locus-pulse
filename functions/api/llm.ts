@@ -93,31 +93,37 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
   const toolTrace: { name: string; arguments: any; result?: any; error?: string }[] = [];
 
-  // Up to 3 tool-call rounds
+  // Try LLM call. If it fails (auth error, network, etc.), fall back to
+  // keyword-based dispatch so the app stays usable without a working LLM key.
   let finalText = '';
+  let llmWorked = false;
+
   for (let round = 0; round < 3; round++) {
     const minimaxRes = await callMiniMax(env.MINIMAX_API_KEY, messages, tools);
     if (!minimaxRes.ok) {
-      return json(
-        { error: 'LLM call failed', detail: minimaxRes.error, quota: formatQuota(userId, quota.used, dailyLimit) },
-        502
-      );
+      // First-round LLM failure → fall back to keyword dispatch
+      if (round === 0) {
+        const dispatched = await keywordFallback(query, env.LOCUS_DATA, toolTrace);
+        if (dispatched) {
+          finalText = dispatched;
+          llmWorked = false;
+        } else {
+          finalText = `Sorry, I could not reach my AI brain right now (${minimaxRes.error}). Try again in a minute.`;
+        }
+      }
+      break;
     }
+    llmWorked = true;
     const choice = minimaxRes.data?.choices?.[0];
-    if (!choice) {
-      return json({ error: 'No LLM response', quota: formatQuota(userId, quota.used, dailyLimit) }, 502);
-    }
+    if (!choice) break;
     const assistantMsg = choice.message;
 
-    // If no tool calls, we're done
     if (!assistantMsg.tool_calls || assistantMsg.tool_calls.length === 0) {
       finalText = assistantMsg.content ?? '';
       break;
     }
 
-    // Execute tool calls (sequential; we don't have parallel tool call support yet)
     messages.push(assistantMsg);
-
     for (const tc of assistantMsg.tool_calls) {
       const call: ToolCall = {
         name: tc.function.name,
@@ -127,18 +133,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       const traceEntry: any = { name: call.name, arguments: call.arguments };
       if (result.ok) {
         traceEntry.result = result.data;
-        messages.push({
-          role: 'tool',
-          content: JSON.stringify(result.data),
-          tool_call_id: tc.id,
-        });
+        messages.push({ role: 'tool', content: JSON.stringify(result.data), tool_call_id: tc.id });
       } else {
         traceEntry.error = result.error;
-        messages.push({
-          role: 'tool',
-          content: JSON.stringify({ error: result.error }),
-          tool_call_id: tc.id,
-        });
+        messages.push({ role: 'tool', content: JSON.stringify({ error: result.error }), tool_call_id: tc.id });
       }
       toolTrace.push(traceEntry);
     }
@@ -163,10 +161,22 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     }
   }
 
+  // Graceful fallback when LLM is unavailable or returns empty —
+  // synthesize a simple spoken response from the tool results so the app
+  // stays useful even without a working LLM key.
+  if (!finalText && toolTrace.length > 0) {
+    finalText = fallbackFromToolTrace(toolTrace);
+  }
+
+  if (!finalText) {
+    finalText = 'Sorry, I could not find an answer. Try asking about news, sports, the cedi rate, or fuel prices.';
+  }
+
   return json({
     text: finalText || 'Sorry, I could not find an answer.',
     toolCalls: toolTrace,
     quota: formatQuota(userId, quota.used, dailyLimit),
+    llmWorked,
   });
 };
 
@@ -227,6 +237,187 @@ function safeParseArgs(raw: any): Record<string, unknown> {
   }
   if (typeof raw === 'object' && raw !== null) return raw;
   return {};
+}
+
+/**
+ * Keyword-based fallback dispatch — used when the LLM is unreachable.
+ * Picks the most likely tool from the user query and runs it.
+ */
+async function keywordFallback(
+  query: string,
+  kv: KVNamespace,
+  trace: { name: string; arguments: any; result?: any; error?: string }[]
+): Promise<string> {
+  const q = query.toLowerCase();
+
+  // Currency conversion: "convert 100 USD to GHS", "100 dollars in cedis"
+  const convertMatch = q.match(/(\d+(?:\.\d+)?)\s*(usd|dollars?|euros?|gbp|pounds?|ngn|naira|cad)\s*(?:to|in|into)\s*(ghs|cedis?|ghana\s*cedi)?/i)
+    || q.match(/(?:convert|how\s*much)\s*(\d+(?:\.\d+)?)?\s*(usd|dollars?|euros?|gbp|pounds?|ngn|naira)/i);
+  if (convertMatch) {
+    const amount = parseFloat(convertMatch[1] || '100');
+    const fromMap: any = { dollar: 'USD', dollars: 'USD', usd: 'USD', euro: 'EUR', euros: 'EUR', gbp: 'GBP', pound: 'GBP', pounds: 'GBP', naira: 'NGN', ngn: 'NGN' };
+    const from = (fromMap[convertMatch[2]?.toLowerCase()] ?? convertMatch[2]?.toUpperCase() ?? 'USD');
+    const call: ToolCall = { name: 'convert_fx', arguments: { amount, from, to: 'GHS' } };
+    const result = await executeToolCall(call, { kv });
+    trace.push({ name: call.name, arguments: call.arguments, ...(result.ok ? { result: result.data } : { error: result.error }) });
+    if (result.ok) {
+      const r: any = result.data;
+      return `${r.amount} ${r.from} is about ${r.converted} ${r.to}.`;
+    }
+  }
+
+  // FX rate
+  if (/cedi|ghs|exchange|forex|fx|dollar|usd/i.test(q)) {
+    const call: ToolCall = { name: 'convert_fx', arguments: { amount: 1, from: 'USD' } };
+    const result = await executeToolCall(call, { kv });
+    trace.push({ name: call.name, arguments: call.arguments, ...(result.ok ? { result: result.data } : { error: result.error }) });
+    if (result.ok) {
+      const r: any = result.data;
+      return `Today, 1 US dollar is ${r.rate.toFixed(2)} cedis, 1 euro is ${(r.rate * 0.862).toFixed(2)} cedis.`;
+    }
+  }
+
+  // Fuel
+  if (/fuel|petrol|diesel|lpg|gas/i.test(q)) {
+    const call: ToolCall = { name: 'get_fuel_prices', arguments: {} };
+    const result = await executeToolCall(call, { kv });
+    trace.push({ name: call.name, arguments: {}, ...(result.ok ? { result: result.data } : { error: result.error }) });
+    if (result.ok && (result.data as any[]).length) {
+      const list = (result.data as any[]).map((f) => `${f.fuelType} ${f.priceGhs.toFixed(2)}`).join(', ');
+      return `Current fuel prices: ${list} cedis.`;
+    }
+  }
+
+  // Power
+  if (/power|electric|outage|ecg|light/i.test(q)) {
+    const call: ToolCall = { name: 'get_power_outages', arguments: {} };
+    const result = await executeToolCall(call, { kv });
+    trace.push({ name: call.name, arguments: {}, ...(result.ok ? { result: result.data } : { error: result.error }) });
+    if (result.ok && (result.data as any[]).length) {
+      return `There are ${(result.data as any[]).length} power outages scheduled today.`;
+    }
+  }
+
+  // Sports
+  if (/sport|match|football|soccer|game|score|fixture|league|kotoko|hearts|black stars|epl|gpl/i.test(q)) {
+    const teamMatch = q.match(/(black\s*stars|kotoko|hearts|ashes|f|liberty|medeama|aduana|chelsea|united|city|liverpool|arsenal|tottenham|barcelona|real\s*madrid)/i);
+    if (teamMatch) {
+      const call: ToolCall = { name: 'get_sports_result', arguments: { team: teamMatch[1], type: 'recent' } };
+      const result = await executeToolCall(call, { kv });
+      trace.push({ name: call.name, arguments: call.arguments, ...(result.ok ? { result: result.data } : { error: result.error }) });
+      if (result.ok && (result.data as any[]).length) {
+        const f = (result.data as any[])[0];
+        return `${f.homeTeam} ${f.homeScore ?? 0} - ${f.awayScore ?? 0} ${f.awayTeam} in ${f.league}.`;
+      }
+    }
+    // Standings
+    const lgMatch = q.match(/(gpl|english\s*premier|epl|la\s*liga|afcon)/i);
+    if (lgMatch) {
+      const league = lgMatch[1].toUpperCase().includes('GPL') ? 'GPL' : lgMatch[1].toUpperCase();
+      const call: ToolCall = { name: 'get_league_standings', arguments: { league, limit: 5 } };
+      const result = await executeToolCall(call, { kv });
+      trace.push({ name: call.name, arguments: call.arguments, ...(result.ok ? { result: result.data } : { error: result.error }) });
+      if (result.ok && (result.data as any[]).length) {
+        const top = (result.data as any[]).slice(0, 3).map((s: any) => `${s.team} (${s.points}pts)`).join(', ');
+        return `${league} top of the table: ${top}.`;
+      }
+    }
+  }
+
+  // Movies
+  if (/movie|cinema|film|showing|playing/i.test(q)) {
+    const call: ToolCall = { name: 'get_movies', arguments: { limit: 5 } };
+    const result = await executeToolCall(call, { kv });
+    trace.push({ name: call.name, arguments: {}, ...(result.ok ? { result: result.data } : { error: result.error }) });
+    if (result.ok && (result.data as any[]).length) {
+      const titles = (result.data as any[]).slice(0, 3).map((m: any) => m.title).join(', ');
+      return `In cinemas: ${titles}.`;
+    }
+  }
+
+  // News
+  if (/news|headline|story|article/i.test(q) || q.length < 30) {
+    const call: ToolCall = { name: 'get_news', arguments: { category: 'ghana_news', limit: 3 } };
+    const result = await executeToolCall(call, { kv });
+    trace.push({ name: call.name, arguments: call.arguments, ...(result.ok ? { result: result.data } : { error: result.error }) });
+    if (result.ok && (result.data as any[]).length) {
+      const titles = (result.data as any[]).slice(0, 2).map((a: any) => a.title.split(':')[0]).join('. ');
+      return `Top stories: ${titles}.`;
+    }
+  }
+
+  // Daily brief as final fallback
+  const call: ToolCall = { name: 'get_daily_brief', arguments: {} };
+  const result = await executeToolCall(call, { kv });
+  trace.push({ name: call.name, arguments: {}, ...(result.ok ? { result: result.data } : { error: result.error }) });
+  if (result.ok) return fallbackFromToolTrace([{ name: call.name, arguments: {}, result: result.data }]);
+
+  return '';
+}
+
+/**
+ * Synthesize a short spoken answer from tool results when LLM is unavailable.
+ * Keeps the app useful even when MINIMAX_API_KEY is missing or invalid.
+ */
+function fallbackFromToolTrace(trace: { name: string; arguments: any; result?: any; error?: string }[]): string {
+  if (trace.length === 0) return '';
+
+  // Daily brief
+  const brief = trace.find((t) => t.name === 'get_daily_brief' && t.result);
+  if (brief && brief.result) {
+    const r = brief.result;
+    const parts: string[] = [];
+    if (r.ghana_news?.length) {
+      parts.push(`Top Ghana news: ${r.ghana_news.slice(0, 3).map((a: any) => a.title.split(':')[0]).join('; ')}.`);
+    }
+    if (r.fx?.GHS && r.fx?.USD) {
+      parts.push(`Today, 1 US dollar is ${r.fx.USD.toFixed(2)} cedis.`);
+    }
+    if (r.fuel?.length) {
+      const petrol = r.fuel.find((f: any) => f.fuelType === 'petrol');
+      if (petrol) parts.push(`Petrol is ${petrol.priceGhs.toFixed(2)} cedis per litre.`);
+    }
+    if (r.movies?.length) {
+      parts.push(`In cinemas: ${r.movies.slice(0, 2).map((m: any) => m.title).join(', ')}.`);
+    }
+    if (parts.length > 0) return parts.join(' ');
+  }
+
+  // FX conversion
+  const fxCall = trace.find((t) => t.name === 'convert_fx' && t.result);
+  if (fxCall && fxCall.result) {
+    const r = fxCall.result;
+    return `${r.amount} ${r.from} is about ${r.converted} ${r.to}.`;
+  }
+
+  // Fuel prices
+  const fuelCall = trace.find((t) => t.name === 'get_fuel_prices' && t.result?.length);
+  if (fuelCall) {
+    const list = fuelCall.result.map((f: any) => `${f.fuelType} ${f.priceGhs.toFixed(2)}`).join(', ');
+    return `Current fuel prices: ${list} cedis.`;
+  }
+
+  // Sports
+  const sportsCall = trace.find((t) => t.name === 'get_sports_result' && t.result?.length);
+  if (sportsCall) {
+    const f = sportsCall.result[0];
+    return `${f.homeTeam} ${f.homeScore ?? 0} - ${f.awayScore ?? 0} ${f.awayTeam} in ${f.league}.`;
+  }
+
+  // News
+  const newsCall = trace.find((t) => t.name === 'get_news' && t.result?.length);
+  if (newsCall) {
+    return `Here's what I found: ${newsCall.result.slice(0, 2).map((a: any) => a.title).join('. ')}.`;
+  }
+
+  // Weather
+  const weatherCall = trace.find((t) => t.name === 'get_weather' && t.result);
+  if (weatherCall && weatherCall.result) {
+    const w = weatherCall.result;
+    return `${w.location}: ${w.temp_c}°C, ${w.description}.`;
+  }
+
+  return '';
 }
 
 interface MiniMaxCallResult {

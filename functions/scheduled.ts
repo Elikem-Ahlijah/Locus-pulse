@@ -184,12 +184,12 @@ async function runDailyRefresh(env: Env): Promise<string> {
     if (res.ok) {
       const data: any = await res.json();
       const rates = data.rates ?? {};
-      // Take USD-base rates and convert to GHS-base for our storage
       const ghsRate = rates.GHS;
       if (ghsRate) {
+        // fx[from] = how many GHS for 1 unit of `from`
         const fx = {
-          USD: 1,
-          GHS: ghsRate,
+          USD: ghsRate,                  // 1 USD = ghsRate GHS
+          GHS: 1,
           EUR: ghsRate / (rates.EUR ?? 1),
           GBP: ghsRate / (rates.GBP ?? 1),
           NGN: ghsRate / (rates.NGN ?? 1),
@@ -198,7 +198,7 @@ async function runDailyRefresh(env: Env): Promise<string> {
           GBP_per_USD: rates.GBP,
         };
         await env.LOCUS_DATA.put(`fx:${date}`, JSON.stringify(fx));
-        tasks.push(`fx: USD=${fx.GHS.toFixed(4)} GHS`);
+        tasks.push(`fx: 1 USD = ${fx.USD.toFixed(4)} GHS`);
       }
     }
   } catch (e: any) {
