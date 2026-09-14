@@ -1,0 +1,30 @@
+name = "locus-pulse"
+compatibility_date = "2025-01-15"
+pages_build_output_dir = "./dist"
+
+# Cloudflare Account
+# Account ID: a488f7858aada3932e7ddceec5e52b92
+
+# KV namespace binding for hydrated data + user quota
+# Namespace ID: e3abd79ac7a14a25abb289d9b35e42d3 (locus-pulse-data)
+[[kv_namespaces]]
+binding = "LOCUS_DATA"
+id = "e3abd79ac7a14a25abb289d9b35e42d3"
+preview_id = "e3abd79ac7a14a25abb289d9b35e42d3"
+
+# Environment variables (set via Cloudflare dashboard or .dev.vars for local)
+# MINIMAX_API_KEY
+# NEWSDATA_API_KEY
+# APIFOOTBALL_KEY
+# CURRENTS_API_KEY
+# GUARDIAN_API_KEY
+# TMDB_API_KEY
+
+# Cron triggers for Pages Functions are configured via the Cloudflare dashboard
+# at: Pages → locus-pulse → Settings → Functions → Scheduled Handler
+# OR via the Cloudflare API after deploy.
+#
+# Daily brief refresh: 06:00 UTC
+# Weekly sports fixtures: 03:00 UTC Sunday
+# Sports live scores: every 6h
+# Daily quota reset: 00:00 UTC (handled by KV TTL)

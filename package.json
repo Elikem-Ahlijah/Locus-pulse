@@ -1,0 +1,29 @@
+{
+  "name": "locus-pulse",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b --noEmit",
+    "deploy": "npm run build && wrangler pages deploy dist --project-name=locus-pulse --commit-dirty=true",
+    "db:seed": "wrangler pages dev dist --d1=placeholder --kv=placeholder --persist-to=.wrangler/state",
+    "logs": "wrangler pages deployment tail --project-name=locus-pulse"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.27.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260911.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "wrangler": "^4.131.2"
+  }
+}
