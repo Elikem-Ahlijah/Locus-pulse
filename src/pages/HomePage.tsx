@@ -1,69 +1,50 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import VoiceButton from '../components/VoiceButton';
-import NewsCard from '../components/NewsCard';
-import SportsCard from '../components/SportsCard';
-import FuelCard from '../components/FxCard';
-import PowerCard from '../components/PowerCard';
-import EntertainmentCard from '../components/EntertainmentCard';
-import { askLocus, fetchQuota } from '../services/llmService';
+import { askLocus } from '../services/llmService';
 import { useSpeechSynthesis } from '../hooks/useSpeechSynthesis';
-import type {
-  Article,
-  SportsFixture,
-  FuelPrice,
-  PowerOutage,
-  Movie,
-  QuotaStatus,
-  LlmToolCall,
-} from '../types';
+import type { LlmToolCall, QuotaStatus } from '../types';
+import WelcomeCard from '../components/WelcomeCard';
+import ConversationTurn from '../components/ConversationTurn';
 
 interface Props {
   onQuotaChange?: (q: QuotaStatus | null) => void;
 }
 
-interface BriefData {
-  date: string;
-  sections: {
-    ghana_news: Article[];
-    sports: Article[];
-    fx: { [k: string]: number } | null;
-    fuel: FuelPrice[];
-    power: PowerOutage[];
-    movies: Movie[];
-  };
-  hasData: { [k: string]: boolean };
-  generatedAt: number;
+interface Turn {
+  id: string;
+  question: string;
+  answer: string;
+  toolCalls: LlmToolCall[];
+  timestamp: number;
+  loading?: boolean;
+  error?: string | null;
 }
+
+const WELCOME_SEEN_KEY = 'locus_pulse_welcome_seen';
 
 const STARTER_CHIPS = [
   { icon: '🌅', label: 'Morning brief', query: 'give me the morning brief' },
   { icon: '💵', label: 'Cedi rate', query: 'what is the cedi rate today' },
   { icon: '⛽', label: 'Fuel prices', query: 'petrol price today' },
-  { icon: '⚡', label: 'Power today', query: 'power cuts today' },
+  { icon: '⚡', label: 'Power today', query: 'any power cuts today' },
   { icon: '⚽', label: 'Black Stars', query: 'how did Black Stars play' },
-  { icon: '🎬', label: 'Movies tonight', query: 'what movies are in cinemas' },
-  { icon: '☀️', label: 'Weather Accra', query: 'weather in Accra' },
+  { icon: '🎬', label: 'Tonight in cinemas', query: 'what movies are in cinemas tonight' },
+  { icon: '☀️', label: "Today's numbers", query: 'give me today\'s numbers — cedi, fuel, power' },
   { icon: '🔁', label: 'Convert', query: 'convert 100 dollars to cedis' },
 ];
 
 export default function HomePage({ onQuotaChange }: Props) {
-  const [brief, setBrief] = useState<BriefData | null>(null);
-  const [agentText, setAgentText] = useState<string>('');
-  const [agentLoading, setAgentLoading] = useState(false);
-  const [toolTrace, setToolTrace] = useState<LlmToolCall[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [turns, setTurns] = useState<Turn[]>([]);
   const [pendingQuery, setPendingQuery] = useState<string | null>(null);
   const [showTextInput, setShowTextInput] = useState(false);
   const [textInputValue, setTextInputValue] = useState('');
-  const [freshness, setFreshness] = useState<{
-    isFresh: boolean;
-    label: string;
-  } | null>(null);
-  const { speak, speaking, cancel } = useSpeechSynthesis();
+  const [showWelcome, setShowWelcome] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return true;
+    return localStorage.getItem(WELCOME_SEEN_KEY) !== '1';
+  });
 
-  useEffect(() => {
-    loadBrief();
-  }, []);
+  const { speak, speaking, cancel } = useSpeechSynthesis();
+  const timelineEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     return () => {
@@ -71,25 +52,15 @@ export default function HomePage({ onQuotaChange }: Props) {
     };
   }, [cancel]);
 
-  function computeFreshness(generatedAt: number) {
-    const ms = Date.now() - generatedAt;
-    const mins = Math.floor(ms / 60_000);
-    const hours = Math.floor(mins / 60);
-    if (mins < 30) return { isFresh: true, label: `Updated ${mins || 1}m ago` };
-    if (mins < 120) return { isFresh: true, label: `Updated ${mins}m ago` };
-    if (hours < 6) return { isFresh: false, label: `Updated ${hours}h ago` };
-    return { isFresh: false, label: `Stale — ${hours}h old` };
-  }
+  // Auto-scroll to latest turn on change
+  useEffect(() => {
+    timelineEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [turns.length, pendingQuery]);
 
-  async function loadBrief() {
-    try {
-      const res = await fetch('/api/brief');
-      if (!res.ok) return;
-      const data = (await res.json()) as BriefData;
-      setBrief(data);
-      if (data.generatedAt) setFreshness(computeFreshness(data.generatedAt));
-    } catch (e) {
-      /* silent — page works via voice */
+  function dismissWelcome() {
+    setShowWelcome(false);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(WELCOME_SEEN_KEY, '1');
     }
   }
 
@@ -99,31 +70,66 @@ export default function HomePage({ onQuotaChange }: Props) {
     setPendingQuery(null);
     setTextInputValue('');
     setShowTextInput(false);
-    void runQuery(trimmed);
+    if (showWelcome) dismissWelcome();
+
+    const id = `t-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const turn: Turn = {
+      id,
+      question: trimmed,
+      answer: '',
+      toolCalls: [],
+      timestamp: Date.now(),
+      loading: true,
+    };
+    setTurns((prev) => [...prev, turn]);
+    void runQuery(id, trimmed);
   }
 
-  async function runQuery(query: string) {
-    setError(null);
-    setAgentLoading(true);
-    setAgentText('');
-    setToolTrace([]);
+  async function runQuery(id: string, query: string) {
     cancel();
     try {
       const res = await askLocus(query);
-      setAgentText(res.text);
-      setToolTrace(res.toolCalls);
+      setTurns((prev) =>
+        prev.map((t) =>
+          t.id === id
+            ? {
+                ...t,
+                answer: res.text,
+                toolCalls: res.toolCalls,
+                loading: false,
+                error: null,
+              }
+            : t
+        )
+      );
       onQuotaChange?.(res.quota);
-      speak(res.text);
+      // Find the index of this turn and only speak if it's still the latest
+      setTurns((prev) => {
+        const idx = prev.findIndex((t) => t.id === id);
+        if (idx === prev.length - 1) speak(res.text);
+        return prev;
+      });
     } catch (e: any) {
       const msg = e?.message ?? 'Something went wrong';
-      setError(msg);
-      setAgentText(`Sorry — ${msg}. Try again.`);
-    } finally {
-      setAgentLoading(false);
+      setTurns((prev) =>
+        prev.map((t) =>
+          t.id === id
+            ? {
+                ...t,
+                answer: `Sorry — ${msg}. Try again, or ask something else.`,
+                loading: false,
+                error: msg,
+              }
+            : t
+        )
+      );
     }
   }
 
-  // Called by VoiceButton when STT finishes — set pending for confirmation
+  function replayTurn(turn: Turn) {
+    if (turn.answer) speak(turn.answer);
+  }
+
   function handleVoiceTranscript(transcript: string) {
     cancel();
     setPendingQuery(transcript);
@@ -149,38 +155,61 @@ export default function HomePage({ onQuotaChange }: Props) {
     if (textInputValue.trim()) submitQuery(textInputValue);
   }
 
-  const hasQuota = true; // keep chips enabled; backend enforces
+  function clearConversation() {
+    cancel();
+    setTurns([]);
+  }
+
+  const hasTurns = turns.length > 0;
 
   return (
     <>
-      {/* Page header: date + freshness pill (replaces hero text) */}
+      {/* Compact header: greeting + clear-session link */}
       <header className="page-header" aria-label="Today">
         <div className="page-header-row">
           <div>
-            <div className="page-date">{formatTodayLong()}</div>
-            <div className="page-greeting">Today's brief, in your ear.</div>
+            <div className="page-greeting">
+              {hasTurns ? 'Still here. Ask me more.' : 'What do you want to know?'}
+            </div>
           </div>
-          {freshness && (
-            <span
-              className={`freshness-pill ${freshness.isFresh ? 'fresh' : 'stale'}`}
-              title="Last data refresh time"
+          {hasTurns && (
+            <button
+              className="quiet-link"
+              onClick={clearConversation}
+              aria-label="Clear conversation"
             >
-              {freshness.label}
-            </span>
+              Clear
+            </button>
           )}
         </div>
       </header>
 
-      {/* Headline KPI strip — the most-asked data points, always visible */}
-      {brief && (
-        <HeadlineKpiStrip
-          fuel={brief.sections.fuel}
-          fx={brief.sections.fx}
-          power={brief.sections.power}
-        />
+      {/* Welcome card — first visit only */}
+      {showWelcome && !hasTurns && <WelcomeCard onDismiss={dismissWelcome} />}
+
+      {/* Conversation timeline */}
+      {hasTurns && (
+        <div className="timeline" role="log" aria-live="polite" aria-label="Conversation">
+          {turns.map((t) => (
+            <ConversationTurn
+              key={t.id}
+              question={t.question}
+              answer={t.answer || (t.loading ? 'Thinking…' : '')}
+              toolCalls={t.toolCalls}
+              speaking={speaking && turns[turns.length - 1]?.id === t.id}
+              timestamp={t.timestamp}
+              onReplay={() => replayTurn(t)}
+              onStop={cancel}
+              onFollowUp={(q) => submitQuery(q)}
+              onShare={() => shareAnswer(t)}
+              onSave={() => saveAnswer(t)}
+            />
+          ))}
+          <div ref={timelineEndRef} />
+        </div>
       )}
 
-      {/* Heard confirmation — appears after STT finishes, before submit */}
+      {/* Pending voice transcript — confirm before sending */}
       {pendingQuery && (
         <div className="heard-confirmation" role="status" aria-live="polite">
           <span className="label">Heard</span>
@@ -194,140 +223,10 @@ export default function HomePage({ onQuotaChange }: Props) {
             <button className="send-btn" onClick={acceptPending} aria-label="Send query">
               Send →
             </button>
+            <button className="edit-btn" onClick={cancelPending} aria-label="Cancel">
+              ✕
+            </button>
           </div>
-        </div>
-      )}
-
-      {/* Speaking bubble — Locus's reply */}
-      {(agentText || agentLoading) && (
-        <div
-          className={`speaking-bubble ${agentLoading ? 'loading' : ''}`}
-          role="status"
-          aria-live="polite"
-        >
-          <div className="speaking-bubble-header">
-            <span className="speaking-bubble-avatar">L</span>
-            <span className="speaking-bubble-name">Locus</span>
-          </div>
-          <div className="speaking-bubble-text">
-            {agentText || 'Thinking…'}
-          </div>
-          {!agentLoading && agentText && (
-            <div className="speaking-bubble-actions">
-              <button
-                className="speaking-bubble-action"
-                onClick={() => speak(agentText)}
-                aria-label="Replay"
-              >
-                🔁 Replay
-              </button>
-              {speaking && (
-                <button
-                  className="speaking-bubble-action"
-                  onClick={cancel}
-                  aria-label="Stop"
-                >
-                  ⏹ Stop
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Error banner */}
-      {error && (
-        <div className="error-banner" role="alert">
-          <span>⚠</span>
-          <span>{error}</span>
-        </div>
-      )}
-
-      {/* Tool trace — collapsed by default */}
-      {toolTrace.length > 0 && (
-        <details className="tool-trace">
-          <summary>
-            <span>Locus checked {toolTrace.length} source{toolTrace.length > 1 ? 's' : ''}</span>
-          </summary>
-          <div className="tool-trace-content">
-            {toolTrace.map((t, i) => (
-              <div key={i} className="tool-trace-item">
-                <code>{t.name}</code>
-                {summarizeArgs(t.arguments) && (
-                  <span style={{ color: 'var(--text-faint)', marginLeft: 8 }}>
-                    · {summarizeArgs(t.arguments)}
-                  </span>
-                )}
-              </div>
-            ))}
-          </div>
-        </details>
-      )}
-
-      {/* Sections: brief content */}
-      {brief && (
-        <>
-          {brief.sections.fuel.length > 0 && (
-            <div className="section">
-              <div className="section-header">
-                <span className="dot" /> Fuel prices
-              </div>
-              <FuelCard fuels={brief.sections.fuel} />
-            </div>
-          )}
-
-          {brief.sections.ghana_news.length > 0 && (
-            <div className="section">
-              <div className="section-header">
-                <span className="dot" /> Top stories — Ghana
-              </div>
-              {brief.sections.ghana_news.slice(0, 3).map((a) => (
-                <NewsCard key={a.id} article={a} />
-              ))}
-            </div>
-          )}
-
-          {brief.sections.sports.length > 0 && (
-            <div className="section">
-              <div className="section-header">
-                <span className="dot" /> Sports
-              </div>
-              {brief.sections.sports.slice(0, 3).map((a) => (
-                <NewsCard key={a.id} article={a} />
-              ))}
-            </div>
-          )}
-
-          {brief.sections.movies.length > 0 && (
-            <div className="section">
-              <div className="section-header">
-                <span className="dot" /> In cinemas
-              </div>
-              {brief.sections.movies.slice(0, 3).map((m) => (
-                <EntertainmentCard key={m.tmdbId} movie={m} />
-              ))}
-            </div>
-          )}
-
-          {brief.sections.power.length > 0 && (
-            <div className="section">
-              <div className="section-header">
-                <span className="dot" /> Power schedule today
-              </div>
-              {brief.sections.power.slice(0, 4).map((o, i) => (
-                <PowerCard key={i} outage={o} />
-              ))}
-            </div>
-          )}
-        </>
-      )}
-
-      {!brief && !agentLoading && (
-        <div className="empty-state">
-          <div className="icon">📡</div>
-          Setting up today's brief…
-          <br />
-          <small>(Daily refresh at 06:00 UTC.)</small>
         </div>
       )}
 
@@ -371,7 +270,6 @@ export default function HomePage({ onQuotaChange }: Props) {
                   key={chip.label}
                   className="chip"
                   onClick={() => submitQuery(chip.query)}
-                  disabled={!hasQuota || agentLoading}
                   aria-label={`Ask: ${chip.label}`}
                 >
                   <span className="chip-icon" aria-hidden="true">{chip.icon}</span>
@@ -398,96 +296,28 @@ export default function HomePage({ onQuotaChange }: Props) {
   );
 }
 
-/* --------------------------------- helpers --------------------------------- */
+/* -------- helpers -------- */
 
-function formatTodayLong(): string {
-  const d = new Date();
-  return d.toLocaleDateString('en-GB', {
-    weekday: 'long',
-    day: 'numeric',
-    month: 'long',
-  });
-}
-
-function summarizeArgs(args: any): string {
-  if (!args) return '';
-  const parts: string[] = [];
-  for (const [k, v] of Object.entries(args)) {
-    if (v == null || v === '') continue;
-    parts.push(
-      `${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`
-    );
+function shareAnswer(turn: Turn) {
+  if (typeof navigator === 'undefined' || !navigator.share) {
+    // Fall back to clipboard
+    navigator.clipboard?.writeText(`${turn.question}\n\n${turn.answer}`).catch(() => {});
+    return;
   }
-  return parts.slice(0, 3).join(' · ');
+  navigator.share({
+    text: `${turn.question}\n\n${turn.answer}`,
+    title: 'Locus Pulse',
+  }).catch(() => {});
 }
 
-/* Headline KPI strip — the 4 most-asked data points */
-function HeadlineKpiStrip({
-  fuel,
-  fx,
-  power,
-}: {
-  fuel: FuelPrice[];
-  fx: { [k: string]: number } | null;
-  power: PowerOutage[];
-}) {
-  const petrol = useMemo(
-    () => fuel.find((f) => f.fuelType === 'petrol') ?? fuel[0],
-    [fuel]
-  );
-  const usd = fx?.USD ? Number(fx.USD.toFixed(2)) : null;
-  const powerCount = power.length;
-
-  return (
-    <div className="kpi-strip" aria-label="Today's headlines">
-      <div className="kpi-tile">
-        <span className="icon" aria-hidden="true">⛽</span>
-        <span className="label">Petrol / Litre</span>
-        {petrol ? (
-          <>
-            <span className="value">GHS {petrol.priceGhs.toFixed(2)}</span>
-            <span className="delta flat">{petrol.fuelType}</span>
-          </>
-        ) : (
-          <span className="value loading">—</span>
-        )}
-      </div>
-
-      <div className="kpi-tile">
-        <span className="icon" aria-hidden="true">💵</span>
-        <span className="label">$1 = GHS</span>
-        {usd != null ? (
-          <>
-            <span className="value">{usd.toFixed(2)}</span>
-            <span className="delta flat">Bank of Ghana</span>
-          </>
-        ) : (
-          <span className="value loading">—</span>
-        )}
-      </div>
-
-      <div className="kpi-tile">
-        <span className="icon" aria-hidden="true">⚡</span>
-        <span className="label">Power today</span>
-        {powerCount > 0 ? (
-          <>
-            <span className="value">{powerCount}</span>
-            <span className="delta flat">scheduled outages</span>
-          </>
-        ) : (
-          <>
-            <span className="value" style={{ color: 'var(--positive)' }}>✓</span>
-            <span className="delta flat">no outages reported</span>
-          </>
-        )}
-      </div>
-
-      <div className="kpi-tile">
-        <span className="icon" aria-hidden="true">🇬🇭</span>
-        <span className="label">Stories today</span>
-        <span className="value">—</span>
-        <span className="delta flat">tap a chip below</span>
-      </div>
-    </div>
-  );
+function saveAnswer(turn: Turn) {
+  if (typeof window === 'undefined') return;
+  const key = 'locus_pulse_saved';
+  const existing = JSON.parse(localStorage.getItem(key) || '[]');
+  existing.push({
+    question: turn.question,
+    answer: turn.answer,
+    timestamp: turn.timestamp,
+  });
+  localStorage.setItem(key, JSON.stringify(existing));
 }

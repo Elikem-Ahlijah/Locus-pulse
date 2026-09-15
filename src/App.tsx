@@ -1,4 +1,4 @@
-import { Routes, Route, NavLink, Link } from 'react-router-dom';
+import { Routes, Route, Link } from 'react-router-dom';
 import { useEffect, useState } from 'react';
 import HomePage from './pages/HomePage';
 import NewsPage from './pages/NewsPage';
@@ -32,32 +32,43 @@ export default function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <Link to="/" className="brand">
+        <Link to="/" className="brand" aria-label="Locus Pulse home">
           <span className="brand-mark">L</span>
-          <span>Locus Pulse</span>
+          <span>Locus</span>
         </Link>
-        <div className={`quota-pill ${quotaClass}`} title="Daily voice query limit">
-          {remaining > 0 ? `${remaining} left` : 'Limit reached'}
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <Link
+            to="/news"
+            className="quiet-link"
+            title="All Ghana news"
+            aria-label="Browse all news"
+          >
+            News
+          </Link>
+          <Link
+            to="/sports"
+            className="quiet-link"
+            title="All sports"
+            aria-label="Browse sports"
+          >
+            Sports
+          </Link>
+          <Link
+            to="/fx"
+            className="quiet-link"
+            title="Money and power"
+            aria-label="Browse money and power"
+          >
+            Money
+          </Link>
+          <span
+            className={`quota-pill ${quotaClass}`}
+            title="Daily voice query limit"
+          >
+            {remaining > 0 ? `${remaining} left` : 'Limit reached'}
+          </span>
         </div>
       </header>
-
-      <nav className="nav-tabs">
-        <NavLink to="/" end className={({ isActive }) => `nav-tab ${isActive ? 'active' : ''}`}>
-          Brief
-        </NavLink>
-        <NavLink to="/news" className={({ isActive }) => `nav-tab ${isActive ? 'active' : ''}`}>
-          News
-        </NavLink>
-        <NavLink to="/sports" className={({ isActive }) => `nav-tab ${isActive ? 'active' : ''}`}>
-          Sports
-        </NavLink>
-        <NavLink to="/entertainment" className={({ isActive }) => `nav-tab ${isActive ? 'active' : ''}`}>
-          Shows
-        </NavLink>
-        <NavLink to="/fx" className={({ isActive }) => `nav-tab ${isActive ? 'active' : ''}`}>
-          FX & More
-        </NavLink>
-      </nav>
 
       <main className="app-main" id="main-content" role="main">
         <Routes>
@@ -66,6 +77,7 @@ export default function App() {
           <Route path="/sports" element={<SportsPage />} />
           <Route path="/entertainment" element={<EntertainmentPage />} />
           <Route path="/fx" element={<FxPage />} />
+          <Route path="*" element={<HomePage onQuotaChange={setQuota} />} />
         </Routes>
       </main>
     </div>
