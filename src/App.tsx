@@ -59,7 +59,7 @@ export default function App() {
         </NavLink>
       </nav>
 
-      <main className="app-main">
+      <main className="app-main" id="main-content" role="main">
         <Routes>
           <Route path="/" element={<HomePage onQuotaChange={setQuota} />} />
           <Route path="/news" element={<NewsPage />} />
